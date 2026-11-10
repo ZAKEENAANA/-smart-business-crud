@@ -1,11 +1,18 @@
-from fastapi.middleware.cors import CORSMiddleware
+import os
+from decimal import Decimal
+
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import text
-from decimal import Decimal
+from sqlalchemy.exc import SQLAlchemyError
 
 from database import engine
 
+
+# --------------------------------------------------
+# FASTAPI APPLICATION
+# --------------------------------------------------
 
 app = FastAPI(
     title="Smart Business CRUD API",
@@ -13,17 +20,32 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+# --------------------------------------------------
+# CORS CONFIGURATION
+# --------------------------------------------------
+
+allowed_origins = [
+    "http://localhost:5173"
+]
+
+frontend_url = os.getenv("FRONTEND_URL")
+
+if frontend_url:
+    allowed_origins.append(frontend_url.rstrip("/"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------------
-# PRODUCT SCHEMA
-# -----------------------------
+
+# --------------------------------------------------
+# PRODUCT SCHEMAS
+# --------------------------------------------------
 
 class ProductCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
@@ -39,31 +61,33 @@ class ProductUpdate(BaseModel):
     quantity: int = Field(ge=0)
 
 
-# -----------------------------
+# --------------------------------------------------
 # HOME ROUTE
-# -----------------------------
+# --------------------------------------------------
 
 @app.get("/")
 def root():
     return {
-        "message": "Smart Business CRUD API is running"
+        "message": "Smart Business CRUD API is running",
+        "status": "success"
     }
 
 
-# -----------------------------
+# --------------------------------------------------
 # HEALTH CHECK
-# -----------------------------
+# --------------------------------------------------
 
 @app.get("/health")
 def health():
     return {
-        "status": "healthy"
+        "status": "healthy",
+        "message": "API is running successfully"
     }
 
 
-# -----------------------------
+# --------------------------------------------------
 # DATABASE TEST
-# -----------------------------
+# --------------------------------------------------
 
 @app.get("/db-test")
 def database_test():
@@ -83,106 +107,131 @@ def database_test():
             "database": database_name
         }
 
-    except Exception as error:
-
+    except SQLAlchemyError:
         raise HTTPException(
             status_code=500,
-            detail=str(error)
+            detail="Database connection failed. Check database configuration."
         )
 
 
-# -----------------------------
+# --------------------------------------------------
 # CREATE PRODUCT
-# -----------------------------
+# --------------------------------------------------
 
 @app.post("/products", status_code=201)
 def create_product(product: ProductCreate):
 
-    with engine.begin() as connection:
+    try:
+        with engine.begin() as connection:
 
-        result = connection.execute(
-            text("""
-                INSERT INTO products
-                (name, category, price, quantity)
-                VALUES
-                (:name, :category, :price, :quantity)
-            """),
-            product.model_dump()
+            result = connection.execute(
+                text("""
+                    INSERT INTO products
+                    (name, category, price, quantity)
+                    VALUES
+                    (:name, :category, :price, :quantity)
+                """),
+                product.model_dump()
+            )
+
+            product_id = result.lastrowid
+
+            new_product = connection.execute(
+                text("""
+                    SELECT *
+                    FROM products
+                    WHERE id = :product_id
+                """),
+                {"product_id": product_id}
+            ).mappings().first()
+
+        if not new_product:
+            raise HTTPException(
+                status_code=500,
+                detail="Product created but could not be retrieved"
+            )
+
+        return {
+            "message": "Product created successfully",
+            "product": dict(new_product)
+        }
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create product"
         )
 
-        product_id = result.lastrowid
 
-        new_product = connection.execute(
-            text("""
-                SELECT *
-                FROM products
-                WHERE id = :product_id
-            """),
-            {"product_id": product_id}
-        ).mappings().first()
-
-    return {
-        "message": "Product created successfully",
-        "product": dict(new_product)
-    }
-
-
-# -----------------------------
+# --------------------------------------------------
 # READ ALL PRODUCTS
-# -----------------------------
+# --------------------------------------------------
 
 @app.get("/products")
 def get_products():
 
-    with engine.connect() as connection:
+    try:
+        with engine.connect() as connection:
 
-        result = connection.execute(
-            text("""
-                SELECT *
-                FROM products
-                ORDER BY id DESC
-            """)
+            result = connection.execute(
+                text("""
+                    SELECT *
+                    FROM products
+                    ORDER BY id DESC
+                """)
+            )
+
+            products = result.mappings().all()
+
+        return {
+            "total": len(products),
+            "products": [dict(product) for product in products]
+        }
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve products"
         )
 
-        products = result.mappings().all()
 
-    return {
-        "total": len(products),
-        "products": [dict(product) for product in products]
-    }
-
-
-# -----------------------------
+# --------------------------------------------------
 # READ SINGLE PRODUCT
-# -----------------------------
+# --------------------------------------------------
 
 @app.get("/products/{product_id}")
 def get_product(product_id: int):
 
-    with engine.connect() as connection:
+    try:
+        with engine.connect() as connection:
 
-        product = connection.execute(
-            text("""
-                SELECT *
-                FROM products
-                WHERE id = :product_id
-            """),
-            {"product_id": product_id}
-        ).mappings().first()
+            product = connection.execute(
+                text("""
+                    SELECT *
+                    FROM products
+                    WHERE id = :product_id
+                """),
+                {"product_id": product_id}
+            ).mappings().first()
 
-    if not product:
+        if not product:
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found"
+            )
 
+        return dict(product)
+
+    except SQLAlchemyError:
         raise HTTPException(
-            status_code=404,
-            detail="Product not found"
+            status_code=500,
+            detail="Failed to retrieve product"
         )
 
-    return dict(product)
 
-
-# -----------------------------
+# --------------------------------------------------
 # UPDATE PRODUCT
-# -----------------------------
+# --------------------------------------------------
 
 @app.put("/products/{product_id}")
 def update_product(
@@ -190,71 +239,83 @@ def update_product(
     product: ProductUpdate
 ):
 
-    with engine.begin() as connection:
+    try:
+        with engine.begin() as connection:
 
-        result = connection.execute(
-            text("""
-                UPDATE products
-                SET
-                    name = :name,
-                    category = :category,
-                    price = :price,
-                    quantity = :quantity
-                WHERE id = :product_id
-            """),
-            {
-                **product.model_dump(),
-                "product_id": product_id
-            }
-        )
-
-        if result.rowcount == 0:
-
-            raise HTTPException(
-                status_code=404,
-                detail="Product not found"
+            result = connection.execute(
+                text("""
+                    UPDATE products
+                    SET
+                        name = :name,
+                        category = :category,
+                        price = :price,
+                        quantity = :quantity
+                    WHERE id = :product_id
+                """),
+                {
+                    **product.model_dump(),
+                    "product_id": product_id
+                }
             )
 
-        updated_product = connection.execute(
-            text("""
-                SELECT *
-                FROM products
-                WHERE id = :product_id
-            """),
-            {"product_id": product_id}
-        ).mappings().first()
+            if result.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Product not found"
+                )
 
-    return {
-        "message": "Product updated successfully",
-        "product": dict(updated_product)
-    }
+            updated_product = connection.execute(
+                text("""
+                    SELECT *
+                    FROM products
+                    WHERE id = :product_id
+                """),
+                {"product_id": product_id}
+            ).mappings().first()
+
+        return {
+            "message": "Product updated successfully",
+            "product": dict(updated_product)
+        }
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update product"
+        )
 
 
-# -----------------------------
+# --------------------------------------------------
 # DELETE PRODUCT
-# -----------------------------
+# --------------------------------------------------
 
 @app.delete("/products/{product_id}")
 def delete_product(product_id: int):
 
-    with engine.begin() as connection:
+    try:
+        with engine.begin() as connection:
 
-        result = connection.execute(
-            text("""
-                DELETE FROM products
-                WHERE id = :product_id
-            """),
-            {"product_id": product_id}
-        )
-
-        if result.rowcount == 0:
-
-            raise HTTPException(
-                status_code=404,
-                detail="Product not found"
+            result = connection.execute(
+                text("""
+                    DELETE FROM products
+                    WHERE id = :product_id
+                """),
+                {"product_id": product_id}
             )
 
-    return {
-        "message": "Product deleted successfully",
-        "product_id": product_id
-    }
+            if result.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Product not found"
+                )
+
+        return {
+            "message": "Product deleted successfully",
+            "product_id": product_id
+        }
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete product"
+        )
