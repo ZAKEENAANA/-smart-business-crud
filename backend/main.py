@@ -26,13 +26,18 @@ app = FastAPI(
 # --------------------------------------------------
 
 allowed_origins = [
-    "http://localhost:5173"
+    "http://localhost:5173",
+    "https://smart-business-crud-frontend.vercel.app"
 ]
 
 frontend_url = os.getenv("FRONTEND_URL")
 
 if frontend_url:
-    allowed_origins.append(frontend_url.rstrip("/"))
+    frontend_url = frontend_url.rstrip("/")
+
+    if frontend_url not in allowed_origins:
+        allowed_origins.append(frontend_url)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,7 +190,9 @@ def get_products():
 
         return {
             "total": len(products),
-            "products": [dict(product) for product in products]
+            "products": [
+                dict(product) for product in products
+            ]
         }
 
     except SQLAlchemyError:
